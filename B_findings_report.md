@@ -1,248 +1,191 @@
 # 代码审查发现报告
 
-## 审查发现列表
+## 审查发现列表（按严重级别排序）
 
 ---
 
-### 发现 01：认证接口通过 URL 明文传递密码
+### F001
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 01 |
-| **标题** | 认证接口通过 URL 明文传递密码 |
-| **级别** | 严重 |
-| **证据** | `routes/user.py:35` + 函数签名 `def login(username: str, password: str)` |
-| **问题说明** | `POST /api/users/authenticate` 接口的 `username` 和 `password` 参数未指定来源（如 Body 或 Form），FastAPI 默认将其作为查询参数处理。密码会出现在 URL、服务器访问日志、代理日志、浏览器历史记录中。 |
-| **影响范围** | 所有使用该认证接口的场景，密码泄露风险极高 |
-| **是否属于真实生产风险** | 是 |
+- **编号**: F001
+- **标题**: 订单创建无用户/商品校验，存在数据完整性风险
+- **级别**: 严重
+- **证据**: services/order.py::create_order() 实现为 `order.created_at = datetime.utcnow(); orders.append(order); save_orders(orders)`，无 users.json 或 products.json 访问
+- **问题说明**: 创建订单时不校验 user_id 是否存在、不校验订单商品是否有效、不校验 total_amount 是否匹配商品计算。系统可接受任意伪造数据。
+- **影响范围**: 订单模块，数据完整性
+- **是否属于真实生产风险**: 是
 
 ---
 
-### 发现 02：初始用户数据使用明文密码存储
+### F002
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 02 |
-| **标题** | 初始用户数据使用明文密码存储 |
-| **级别** | 严重 |
-| **证据** | `data/users.json:L5` 的 `"password": "contraseña123"` 等明文密码 |
-| **问题说明** | 虽然代码中有 `hash_password()` 函数（`services/user.py:19-21`），但 JSON 文件中的初始用户密码均为明文。这意味着：1) 这些用户无法通过 `authenticate_user()` 认证（因为认证时会对输入做 hash 后比对）；2) 如果有人直接读取文件可获取明文密码。 |
-| **影响范围** | 所有预置用户账号 |
-| **是否属于真实生产风险** | 是 |
+- **编号**: F002
+- **标题**: 库存与订单完全脱节，存在超卖风险
+- **级别**: 严重
+- **证据**: services/order.py 无任何 inventory 相关 import 或调用；services/inventory.py 无任何被 order 模块调用的痕迹
+- **问题说明**: 创建订单时不扣减库存，不检查库存余量。inventory 模块与订单系统完全独立，无法防止超卖。
+- **影响范围**: 订单、库存、商品模块
+- **是否属于真实生产风险**: 是
 
 ---
 
-### 发现 03：并发写入导致数据丢失
+### F003
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 03 |
-| **标题** | 并发写入导致数据丢失 |
-| **级别** | 严重 |
-| **证据** | `services/cart.py:38-55` 的 `add_to_cart()` 函数采用"读取-修改-写入"模式，无锁机制 |
-| **问题说明** | 当两个请求同时修改同一用户的购物车时：请求 A 读取文件 → 请求 B 读取文件 → 请求 A 写入 → 请求 B 写入。请求 B 的写入会覆盖请求 A 的修改，导致数据丢失。所有采用此模式的模块（product、cart、order、inventory、payment、user、category）均存在此问题。 |
-| **影响范围** | 所有写操作，高并发场景下必然发生 |
-| **是否属于真实生产风险** | 是 |
+- **编号**: F003
+- **标题**: 密码使用裸 SHA256 哈希，无盐值保护
+- **级别**: 严重
+- **证据**: services/user.py::hash_password() 实现为 `sha256(password.encode()).hexdigest()`
+- **问题说明**: SHA256 是快速哈希算法，无盐值保护，极易被彩虹表攻击。不符合现代密码存储标准。
+- **影响范围**: 用户认证模块
+- **是否属于真实生产风险**: 是
 
 ---
 
-### 发现 04：订单创建无业务校验
+### F004
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 04 |
-| **标题** | 订单创建无业务校验 |
-| **级别** | 高 |
-| **证据** | `services/order.py:39-45` 的 `create_order()` 函数 |
-| **问题说明** | 创建订单时不校验：1) 用户是否存在；2) 商品是否存在；3) 库存是否充足；4) 不扣减库存；5) 不清理购物车。订单的 `total_amount` 完全由客户端传入，服务端不做计算和校验，可被恶意篡改。 |
-| **影响范围** | 订单模块，可导致虚假订单、金额篡改 |
-| **是否属于真实生产风险** | 是 |
+- **编号**: F004
+- **标题**: JSON 文件无并发控制，多进程下数据会损坏
+- **级别**: 严重
+- **证据**: services/product.py::save_products() 使用 `with open(PRODUCTS_FILE, "w")` 直接覆盖写入，无文件锁（fcntl/portalocker 等）
+- **问题说明**: 多个请求同时写入同一文件时，后完成的写入会覆盖先完成的，导致数据丢失。
+- **影响范围**: 所有使用 JSON 文件的模块
+- **是否属于真实生产风险**: 是
 
 ---
 
-### 发现 05：DELETE 接口返回 204 状态码但包含响应体
+### F005
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 05 |
-| **标题** | DELETE 接口返回 204 状态码但包含响应体 |
-| **级别** | 高 |
-| **证据** | `routes/product.py:52-55`、`routes/cart.py:30-34`、`routes/category.py:53-57`、`routes/inventory.py:45-50` |
-| **问题说明** | HTTP 204 (No Content) 规范要求响应必须无消息体。代码中设置 `status_code=204` 但返回了 `{"detail": "..."}` 字典。虽然 FastAPI 会序列化该字典，但这违反 HTTP 规范，部分 HTTP 客户端可能解析异常。 |
-| **影响范围** | 所有 DELETE 接口 |
-| **是否属于真实生产风险** | 是 |
+- **编号**: F005
+- **标题**: JSON 解码错误时静默清空文件，导致数据丢失
+- **级别**: 高
+- **证据**: services/inventory.py::load_inventory() 中 `except json.JSONDecodeError: ... with open(INVENTORY_FILE, "w") as file: json.dump([], file)`
+- **问题说明**: 当 JSON 文件损坏时，系统不告警、不备份，直接清空文件。生产环境数据可能永久丢失。
+- **影响范围**: inventory 模块（services/product.py、services/category.py 等也有类似模式）
+- **是否属于真实生产风险**: 是
 
 ---
 
-### 发现 06：Product.stock 与 Inventory 数据不同步
+### F006
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 06 |
-| **标题** | Product.stock 与 Inventory 数据不同步 |
-| **级别** | 高 |
-| **证据** | `models/product.py:L7` 的 `stock: int` 与 `models/Inventory.py:L6` 的 `quantity_available: int` |
-| **问题说明** | 商品模型和库存模型都有"库存数量"字段，但两者完全独立维护，无同步机制。`services/product.py` 和 `services/inventory.py` 无互相调用。这会导致数据不一致，业务语义混乱。 |
-| **影响范围** | 商品模块、库存模块，数据一致性 |
-| **是否属于真实生产风险** | 是 |
+- **编号**: F006
+- **标题**: 删除操作返回 204 但带有响应体，违反 HTTP 语义
+- **级别**: 高
+- **证据**: routes/product.py::remove_product() 声明 `status_code=204` 但函数内 `return {"detail": f"Producto con ID {product_id} eliminado exitosamente."}`
+- **问题说明**: HTTP 204 表示无内容，但接口返回 JSON 响应体。某些严格 HTTP 客户端可能拒绝解析。
+- **影响范围**: 所有删除路由（routes/product.py::remove_product、routes/category.py::remove_category、routes/inventory.py::delete_stock、routes/cart.py::remove_item_from_cart）
+- **是否属于真实生产风险**: 是
 
 ---
 
-### 发现 07：异常处理将内部错误细节暴露给客户端
+### F007
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 07 |
-| **标题** | 异常处理将内部错误细节暴露给客户端 |
-| **级别** | 中 |
-| **证据** | `routes/product.py:21` 的 `raise HTTPException(status_code=500, detail=str(e))` |
-| **问题说明** | 所有路由层的通用异常处理 `except Exception as e: raise HTTPException(status_code=500, detail=str(e))` 会将原始异常信息直接返回给客户端。这可能暴露文件路径、内部结构等敏感信息。 |
-| **影响范围** | 所有路由模块 |
-| **是否属于真实生产风险** | 是 |
+- **编号**: F007
+- **标题**: 购物车添加不校验用户和商品存在性
+- **级别**: 中
+- **证据**: services/cart.py::add_to_cart() 实现为检查 `(cart_item.user_id == item.user_id and cart_item.product_id == item.product_id)`，不访问 users.json 或 products.json
+- **问题说明**: 可添加不存在的商品到购物车，或给不存在的用户添加购物车。数据无意义但系统接受。
+- **影响范围**: 购物车模块
+- **是否属于真实生产风险**: 否
 
 ---
 
-### 发现 08：模型文件命名不一致
+### F008
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 08 |
-| **标题** | 模型文件命名不一致 |
-| **级别** | 中 |
-| **证据** | `models/Cart.py`（大写 C）、`models/Order.py`（大写 O）vs `models/product.py`（小写 p）、`models/user.py`（小写 u） |
-| **问题说明** | 同一目录下的文件命名风格不统一，部分使用 PascalCase（`Cart.py`、`Order.py`、`Inventory.py`、`Payment.py`），部分使用 snake_case（`product.py`、`user.py`、`category.py`）。这在区分大小写的文件系统上可能导致导入问题。 |
-| **影响范围** | 代码可维护性、跨平台兼容性 |
-| **是否属于真实生产风险** | 否 |
+- **编号**: F008
+- **标题**: 商品和库存数据冗余且无同步机制
+- **级别**: 中
+- **证据**: models/product.py 定义 `stock: int`；models/Inventory.py 定义 `quantity_available: int`；两模块无互相调用
+- **问题说明**: 同一概念在两个地方维护，且无同步逻辑。修改一处另一处不会更新，必然产生不一致。
+- **影响范围**: 商品、库存模块
+- **是否属于真实生产风险**: 否（推断：目前 inventory 模块未被实际使用）
 
 ---
 
-### 发现 09：JSON 解码错误时静默返回空列表
+### F009
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 09 |
-| **标题** | JSON 解码错误时静默返回空列表 |
-| **级别** | 中 |
-| **证据** | `services/product.py:26-28` 的 `except json.JSONDecodeError as e: print(...); return []` |
-| **问题说明** | 当 JSON 文件损坏时，`load_*()` 函数会打印错误并返回空列表，而非抛出异常。这会导致：1) 数据被静默丢弃；2) 后续保存操作可能覆盖损坏文件，造成数据永久丢失；3) 调用方无法感知异常。 |
-| **影响范围** | 所有 service 模块的数据加载函数 |
-| **是否属于真实生产风险** | 是 |
+- **编号**: F009
+- **标题**: 订单 ID 由客户端传入，无自增/唯一性保证
+- **级别**: 中
+- **证据**: services/order.py::create_order() 实现为 `orders.append(order); save_orders(orders)`，无 `if any(o.id == order.id for o in orders)` 类检查
+- **问题说明**: 与 product/category 不同，order 创建时不校验 ID 唯一性。重复 ID 会导致查询返回多个结果或覆盖。
+- **影响范围**: 订单模块
+- **是否属于真实生产风险**: 是
 
 ---
 
-### 发现 10：购物车缺少价格信息
+### F010
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 10 |
-| **标题** | 购物车缺少价格信息 |
-| **级别** | 中 |
-| **证据** | `models/Cart.py:L4-L6` 的 CartItem 模型仅包含 `user_id`、`product_id`、`quantity` |
-| **问题说明** | 购物车项不存储商品价格，每次需要展示购物车总价时都必须额外查询商品信息。如果商品价格在加入购物车后发生变化，用户看到的总价会随之变化（这可能是预期行为，也可能是 bug，取决于业务需求）。 |
-| **影响范围** | 购物车模块 |
-| **是否属于真实生产风险** | 否 |
+- **编号**: F010
+- **标题**: 文件路径硬编码，无法配置化
+- **级别**: 低
+- **证据**: services/product.py::PRODUCTS_FILE = "data/products.json"；services/order.py::ORDERS_FILE = "data/orders.json"；services/cart.py::CART_FILE = "data/cart.json" 等
+- **问题说明**: 数据目录无法通过环境变量调整，测试环境难以隔离，无法灵活部署到不同目录。
+- **影响范围**: 所有 service 模块
+- **是否属于真实生产风险**: 否
 
 ---
 
-### 发现 11：Order.created_at 字段类型与实际行为不符
+### F011
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 11 |
-| **标题** | Order.created_at 字段类型与实际行为不符 |
-| **级别** | 中 |
-| **证据** | `models/Order.py:L8` 定义 `created_at: datetime` 为必填字段 |
-| **问题说明** | Pydantic 模型中 `created_at` 是必填字段，但客户端创建订单时传入的 `created_at` 值会被服务端覆盖（`services/order.py:42`）。这导致 API 契约与实际行为不一致：客户端以为需要传入该字段，实际上传了也会被忽略。 |
-| **影响范围** | 订单模块，API 契约 |
-| **是否属于真实生产风险** | 否 |
+- **编号**: F011
+- **标题**: 异常处理过于宽泛，隐藏真实错误信息
+- **级别**: 低
+- **证据**: routes/product.py::add_product() 中 `except Exception as e: raise HTTPException(status_code=500, detail=str(e))`；routes/order.py、routes/cart.py 等均有相同模式
+- **问题说明**: 捕获过于宽泛的异常，可能将内部错误细节暴露给客户端，或掩盖真正的问题根源。
+- **影响范围**: 所有 routes 模块
+- **是否属于真实生产风险**: 否
 
 ---
 
-### 发现 12：GET /api/products/export 路由顺序问题
+## 不是 Bug 但值得警惕的设计选择
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 12 |
-| **标题** | GET /api/products/export 路由顺序问题 |
-| **级别** | 低 |
-| **证据** | `routes/product.py:67-73` 的 `@router.get("/export")` 定义在 `@router.get("/{product_id}")` 之后 |
-| **问题说明** | FastAPI 按定义顺序匹配路由，`/export` 会被 `/{product_id}` 先匹配到（"export" 被当作 product_id）。当前代码之所以能工作，是因为 `get_product_by_id("export")` 会抛出 ValueError 转为 404，但这依赖异常处理而非正确的路由设计。 |
-| **影响范围** | 商品导出功能 |
-| **是否属于真实生产风险** | 否 |
+### D001: 购物车使用复合主键而非独立 ID
 
----
+说明：CartItem 模型没有独立 id 字段，使用 (user_id, product_id) 作为逻辑主键。
 
-### 发现 13：缺少输入验证
+证据：models/Cart.py 定义 `class CartItem(BaseModel): user_id: int; product_id: int; quantity: int`，无 id 字段；services/cart.py::add_to_cart() 中 `if cart_item.user_id == item.user_id and cart_item.product_id == item.product_id` 实现复合主键查找
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 13 |
-| **标题** | 缺少输入验证 |
-| **级别** | 低 |
-| **证据** | `models/product.py:L5-L9` 的 Product 模型无字段约束 |
-| **问题说明** | 所有模型字段均无验证约束：`price` 可为负数、`stock` 可为负数、`quantity` 可为 0 或负数。虽然 Pydantic 会校验类型，但业务层面的数据合法性未做约束。 |
-| **影响范围** | 所有模块 |
-| **是否属于真实生产风险** | 是 |
+潜在问题：
+- 同一用户无法对同一商品创建多条购物车记录（如不同规格）
+- 如果需要扩展购物车功能（如收藏、稍后购买），当前结构受限
+- 删除后重新添加会丢失历史记录
 
 ---
 
-### 发现 14：使用 sha256 作为密码哈希算法
+### D002: 订单 total_amount 由客户端传入而非服务端计算
 
-| 字段 | 内容 |
-|------|------|
-| **编号** | 14 |
-| **标题** | 使用 sha256 作为密码哈希算法 |
-| **级别** | 低 |
-| **证据** | `services/user.py:19-21` 的 `hash_password()` 函数 |
-| **问题说明** | SHA-256 是快速哈希算法，不适合用于密码存储。攻击者可以快速尝试大量密码组合。应使用 bcrypt、scrypt 或 Argon2 等专门设计用于密码哈希的慢速算法。 |
-| **影响范围** | 用户模块，密码安全 |
-| **是否属于真实生产风险** | 是 |
+说明：Order 模型的 total_amount 是必填字段，由调用方提供。
 
----
+证据：models/Order.py 定义 `total_amount: float`；services/order.py::create_order() 直接使用传入值，无计算逻辑
 
-## 不是 bug 但值得警惕的设计选择
-
-### 设计选择 01：无外键约束的数据模型
-
-| 字段 | 内容 |
-|------|------|
-| **描述** | 模型之间存在逻辑关联（如 `Product.category_id` 关联 `Category.id`，`CartItem.product_id` 关联 `Product.id`），但代码层面无任何约束或校验。 |
-| **潜在风险** | 可以创建关联不存在分类的商品、关联不存在商品的购物车项、关联不存在用户的订单。数据完整性完全依赖调用方自觉。 |
-| **证据** | `services/product.py:48-55` 的 `create_product()` 函数未校验 `category_id` 是否存在 |
-
-### 设计选择 02：无幂等性保障
-
-| 字段 | 内容 |
-|------|------|
-| **描述** | 所有 POST 接口均未实现幂等性机制（如幂等键）。重复调用会创建重复数据。 |
-| **潜在风险** | 网络超时重试、用户重复点击等场景会导致重复创建订单、重复支付记录。虽然部分模块有 ID 唯一性检查（如 product、category），但订单、支付、购物车无此保护。 |
-| **证据** | `services/order.py:39-45` 的 `create_order()` 无任何去重机制 |
-
-### 设计选择 03：Excel 导出文件路径硬编码
-
-| 字段 | 内容 |
-|------|------|
-| **描述** | `export_products_to_excel()` 将文件保存到当前工作目录的 `productos.xlsx`，路径硬编码。 |
-| **潜在风险** | 1) 多次调用会覆盖之前文件；2) 无权限时静默失败；3) 文件名包含特殊字符时可能异常；4) 无法指定输出目录。 |
-| **证据** | `services/product.py:100` 的 `file_path = "productos.xlsx"` |
+潜在问题：
+- 客户端可随意篡改订单金额
+- 服务端无校验逻辑，无法防止恶意低价下单
+- 与购物车数据无关联，订单内容与金额可能不匹配
 
 ---
 
-## 审查总结
+### D003: 模型命名风格不一致
 
-| 级别 | 数量 |
-|------|------|
-| 严重 | 3 |
-| 高 | 3 |
-| 中 | 3 |
-| 低 | 2 |
-| **总计** | **11** |
+说明：models/ 目录下同时存在小写和首字母大写的模块名。
 
-**核心问题归纳**：
+证据：models/product.py（小写）、models/category.py（小写）vs models/Order.py（首字母大写）、models/Cart.py（首字母大写）、models/Inventory.py（首字母大写）、models/Payment.py（首字母大写）
 
-1. **安全性**：认证接口设计缺陷、密码存储不当、错误信息泄露
-2. **并发安全**：无锁机制导致数据竞争
-3. **业务完整性**：订单创建无校验、数据模型无约束
-4. **HTTP 规范**：状态码与响应体不匹配
+潜在问题：
+- 影响代码可读性和维护性
+- 可能导致导入时的困惑
+- 不符合 Python PEP8 命名规范（模块名应小写）
 
-**推断说明**：本报告基于代码静态分析，未进行运行时测试。部分问题（如并发写入）需实际压测验证。
+---
+
+### D004: 库存更新直接设置值而非增减操作
+
+说明：services/inventory.py::update_inventory() 接收 quantity 参数直接赋值，而非增减。
+
+证据：services/inventory.py::update_inventory() 实现为 `inv.quantity_available = quantity`，非 `inv.quantity_available += quantity` 或 `-=`
+
+潜在问题：
+- 调用方需要自行计算新库存值，增加出错概率
+- 无并发控制时，两个同时的更新请求会导致最终值不确定
+- 无法实现扣减 N 件这样的原子操作语义
+
+---
